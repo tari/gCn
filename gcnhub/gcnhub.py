@@ -4,15 +4,6 @@
 # Christopher Mitchell, 2011-2014
 # Licensed under the BSD 3-Clause License (see LICENSE)
 
-# Port to run TCP server on
-GCNPORT = 4295
-# Port to run SSL server on. CERTFILE and KEYFILE must also be specified.
-SSLPORT = 4296
-# Path to SSL certificate file
-CERTFILE = None
-# Path to SSL key file
-KEYFILE = None
-
 from collections import defaultdict
 import struct
 from twisted.internet import reactor
@@ -20,8 +11,7 @@ from twisted.internet.endpoints import TCP4ServerEndpoint, SSL4ServerEndpoint
 from twisted.internet.protocol import Protocol
 from twisted.internet.protocol import ServerFactory
 from twisted.internet.ssl import DefaultOpenSSLContextFactory
-
-from logging import *
+from twisted.python import log
 
 
 class GCNProtocol(Protocol):
@@ -61,7 +51,7 @@ class GCNProtocol(Protocol):
             endpoints = self.factory.virtual_hubs[self.hub_name]
             endpoints.remove(self)
             if len(endpoints) is 0:
-                log_info('gcnhub: [MSG] Virtual hub ' + self.hub_name + ' lost its last endpoint and was destroyed')
+                log.msg('Virtual hub {} lost its last endpoing and was destroyed'.format(self.hub_name))
                 del self.factory.virtual_hubs[self.hub_name]
         self.factory.stats.remove_calculators(len(self.calculators))
 
@@ -79,7 +69,7 @@ class GCNProtocol(Protocol):
 
     def handle_msg(self, msg_type, payload):
         if len(payload) > 300:
-            log_warn("gcnhub: [MSG] Rejecting message of length " + str(len(payload)))
+            log.err('Rejecting message of length {}'.format(len(payload)))
             return
 
         if msg_type == 'j':
@@ -91,7 +81,7 @@ class GCNProtocol(Protocol):
         elif msg_type == 'f':
             self.handle_frame(payload)
         else:
-            log_warn("gcnhub: [MSG] Unknown message of length " + str(len(payload)) + "")
+            log.err('Ignoring unknown message of type {} and length {}'.format(msg_type, len(payload)))
 
     def handle_vhub_join(self, payload):
         """Handles incoming "join vhub" messages.
@@ -106,22 +96,21 @@ class GCNProtocol(Protocol):
         local_name = payload[local_name_idx:local_name_idx + local_name_len]
 
         if 0 < len(local_name) < 16 and 0 < len(hub_name) < 16:
-            log_info("gcnhub: [MSG] Join from " + self.addrport + ": " + local_name + "->" + hub_name)
+            log.msg('Join from {}: {} -> {}'.format(self.addrport, local_name, hub_name))
             self.local_name = local_name
             self.hub_name = hub_name
             self.factory.virtual_hubs[hub_name].append(self)
         else:
-            log_warn("gcnhub: [MSG] INVALID join from " + self.addrport + ": " + local_name + "->" + hub_name)
+            log.err('Invalid join from {}: {} -> {}'.format(self.addrport, local_name, hub_name))
 
     def handle_vhub_calc(self, payload):
         """Handles incoming "new calculator" messages."""
         if len(payload) != 10:
-                log_warn("gcnhub: [MSG] " + self.addrport + " got a calc add with invalid length")
+            log.err('{} got a calc add with invalid length'.format(self.addrport))
         elif self.hub_name is None:
-                log_warn("gcnhub: [MSG] " + self.addrport + " tried to add calculator " +
-                         payload + " but is not joined to a hub")
+            log.err('{} tried to add calculator {} but is not joined to a hub'.format(self.addrport, payload))
         else:
-            log_info("gcnhub: [MSG] " + self.addrport + " is adding calculator " + payload + "...")
+            log.msg('{} is adding calculator {}...'.format(self.addrport, payload))
             sid = payload
             if sid not in self.calculators:
                 self.factory.stats.add_calculator()
@@ -146,9 +135,9 @@ class GCNProtocol(Protocol):
     def handle_broadcast(self, payload):
         """Handles incoming broadcast frames."""
         if self.hub_name is None:
-            log_warn("gcnhub: [MSG] " + self.addrport + " tried to send a broadcast, but is not joined to a hub")
+            log.err('{} tried to send a broadcast, but is not joined to a hub'.format(self.addrport))
         elif len(payload) > 256 + 5 + 5 + 2 + 3:
-            log_warn("gcnhub: [MSG] " + self.addrport + " sent an overflow-length broadcast")
+            log.err('{} sent an overflow-length broadcast'.format(self.addrport))
         else:
             message = self.pack_broadcast(payload)
             for endpoint in self.endpoints():
@@ -161,9 +150,9 @@ class GCNProtocol(Protocol):
     def handle_frame(self, payload):
         """Handles incoming directed frames."""
         if self.hub_name is None:
-            log_warn("gcnhub: [MSG] " + self.addrport + " tried to send a frame, but is not joined to a hub")
+            log.err('{} tried to send a frame, but is not joined to a hub'.format(self.addrport))
         elif len(payload) > 256 + 5 + 5 + 2 + 3:
-            log_warn("gcnhub: [MSG] " + self.addrport + " sent an overflow-length frame")
+            log.err('{} sent an overflow-length frame'.format(self.addrport))
         else:
             # "new calculator" messages have the calculator address as a hex string (10 characters) rather than 5-byte
             # binary address. Do this transformation to work around it in a stupid fashion.
@@ -203,20 +192,32 @@ class StatisticsTracker(object):
         self.calcs_active -= n
 
 
+from twisted.application import internet, service
+
+
+def make_service(config):
+    s = service.MultiService()
+    stats = StatisticsTracker()
+    # TODO TimerService for stats reporting
+    factory = GCNFactory(stats)
+
+    t = internet.TCPServer(config['port'], factory)
+    t.setServiceParent(s)
+
+    if 'sslport' in config:
+        certfile = config['certfile']
+        keyfile = config.get('keyfile', certfile)
+        ctxt = DefaultOpenSSLContextFactory(keyfile, certfile)
+        e = internet.SSLServer(config['sslport'], factory, ctxt)
+        e.setServiceParent(s)
+
+    return s
+
+
 if __name__ == '__main__':
-    try:
-        stats = StatisticsTracker()
-        factory = GCNFactory(stats)
+    import sys
+    log.startLogging(sys.stdout)
 
-        ep = TCP4ServerEndpoint(reactor, GCNPORT)
-        ep.listen(factory)
-
-        if KEYFILE and CERTFILE:
-            ep_ssl = SSL4ServerEndpoint(reactor, SSLPORT, DefaultOpenSSLContextFactory(KEYFILE, CERTFILE))
-            ep_ssl.listen(factory)
-        else:
-            log_warn('Key and certificate not specified; not running SSL server.')
-
-        reactor.run()
-    except KeyboardInterrupt:
-        log_error('gcnhub: You pressed Ctrl+C!')
+    stats = StatisticsTracker()
+    reactor.listenTCP(4295, GCNFactory(stats))
+    reactor.run()

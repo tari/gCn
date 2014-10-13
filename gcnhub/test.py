@@ -4,6 +4,7 @@ from twisted.test import proto_helpers
 
 import gcnhub
 
+## trial test.py
 
 class MetaHubTestCase(unittest.TestCase):
     def setUp(self):
