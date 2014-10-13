@@ -25,8 +25,7 @@ from logging import *
 
 
 class GCNProtocol(Protocol):
-    def __init__(self, stats):
-        self.stats = stats
+    def __init__(self):
         self.buffer = bytearray()
 
         self.hub_name = None
@@ -52,9 +51,9 @@ class GCNProtocol(Protocol):
         self.buffer.extend(data)
 
         while self.have_message():
-            msg_type = self.buffer[2]
+            msg_type = chr(self.buffer[2])
             payload = self.buffer[3:3 + self.payload_len()]
-            self.handle_message(msg_type, payload)
+            self.handle_msg(msg_type, payload)
             del self.buffer[:3 + self.payload_len()]
 
     def connectionLost(self, reason):
@@ -69,26 +68,27 @@ class GCNProtocol(Protocol):
     @property
     def addrport(self):
         """Hack to avoid needing to change a lot of the original code."""
-        return self.transport.getPeer()
+        return str(self.transport.getPeer())
 
     def endpoints(self):
-        """Generator over all endpoints on the current vhub."""
+        """Generator over all endpoints on the current vhub, excluding self."""
         assert self.hub_name is not None
         for endpoint in self.factory.virtual_hubs[self.hub_name]:
-            yield endpoint
+            if endpoint is not self:
+                yield endpoint
 
     def handle_msg(self, msg_type, payload):
         if len(payload) > 300:
             log_warn("gcnhub: [MSG] Rejecting message of length " + str(len(payload)))
             return
 
-        if msg_type == b'j':
+        if msg_type == 'j':
             self.handle_vhub_join(payload)
-        elif msg_type == b'c':
+        elif msg_type == 'c':
             self.handle_vhub_calc(payload)
-        elif msg_type == b'b':
+        elif msg_type == 'b':
             self.handle_broadcast(payload)
-        elif msg_type == b'f':
+        elif msg_type == 'f':
             self.handle_frame(payload)
         else:
             log_warn("gcnhub: [MSG] Unknown message of length " + str(len(payload)) + "")
@@ -99,13 +99,13 @@ class GCNProtocol(Protocol):
         Associates this endpoint with a virtual hub, setting local_name and hub_name on self if join is accepted.
         """
         hub_name_len = payload[0]
-        hub_name = payload[1:1 + hub_name_len]
+        hub_name = str(payload[1:1 + hub_name_len])
 
         local_name_idx = hub_name_len + 2
         local_name_len = payload[local_name_idx - 1]
         local_name = payload[local_name_idx:local_name_idx + local_name_len]
 
-        if 0 < len(local_name) < 16 and 0 < hub_name < 16:
+        if 0 < len(local_name) < 16 and 0 < len(hub_name) < 16:
             log_info("gcnhub: [MSG] Join from " + self.addrport + ": " + local_name + "->" + hub_name)
             self.local_name = local_name
             self.hub_name = hub_name
@@ -170,7 +170,7 @@ class GCNProtocol(Protocol):
             dest_addr = ''.join('{:02X}'.format(b) for b in payload[2:7])
             # Find the endpoint that has this calculator, if any (not including this one, because if the calculator is
             # on this endpoint we don't need to do anything).
-            for endpoint in filter(lambda e: e is not self, self.endpoints()):
+            for endpoint in self.endpoints():
                 if dest_addr in endpoint.calculators:
                     endpoint.transmit(self.pack_directed(payload))
                     break
